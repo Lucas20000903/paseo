@@ -118,6 +118,7 @@ import {
   mapOmpRpcUiPermissionRequest,
 } from "./rpc-ui-permission-mapper.js";
 import { DEFAULT_OMP_THINKING_LEVEL, mapOmpModel } from "./map-omp-model.js";
+import { resolveOmpUsageReference } from "./usage-reference.js";
 
 const OMP_PROVIDER = "omp";
 const OMP_CORE_CAPABILITIES: AgentCapabilityFlags = {
@@ -196,6 +197,7 @@ interface OmpAgentSessionOptions {
   usagePollScheduler?: OmpUsagePollScheduler;
   providerIdleDeadlineMs?: number;
   paseoTools?: PaseoToolCatalog;
+  usageEnv?: NodeJS.ProcessEnv;
   /**
    * When false (resumed sessions), replayed session events are dropped until
    * the first prompt or agent_start so history is not re-emitted as live
@@ -713,6 +715,7 @@ export class OmpAgentSession implements AgentSession {
     this.currentModeId = options.currentModeId ?? null;
     this.logger = options.logger;
     this.paseoTools = options.paseoTools;
+    this.usageEnv = options.usageEnv ?? process.env;
     this.live = options.live ?? true;
     this.providerIdleScheduler = options.providerIdleScheduler ?? createOmpProviderIdleScheduler();
     this.providerIdleDeadlineMs = options.providerIdleDeadlineMs ?? OMP_PROVIDER_IDLE_DEADLINE_MS;
@@ -762,6 +765,12 @@ export class OmpAgentSession implements AgentSession {
   private readonly config: AgentSessionConfig;
   private readonly logger: Logger;
   private readonly paseoTools?: PaseoToolCatalog;
+  private readonly usageEnv: NodeJS.ProcessEnv;
+
+  async getUsageReference() {
+    const state = await this.runtimeSession.getState();
+    return resolveOmpUsageReference(state.sessionId, state.model?.provider ?? "", this.usageEnv);
+  }
 
   get id(): string | null {
     return this.state.sessionId;
@@ -2267,6 +2276,7 @@ export class OmpAgentClient implements AgentClient {
         usagePollScheduler: this.usagePollScheduler,
         providerIdleDeadlineMs: this.providerIdleDeadlineMs,
         paseoTools: launchContext?.paseoTools,
+        usageEnv: { ...process.env, ...this.runtimeSettings?.env, ...launchContext?.env },
       });
     } catch (error) {
       await runtimeSession.close().catch(() => undefined);
@@ -2320,6 +2330,7 @@ export class OmpAgentClient implements AgentClient {
         usagePollScheduler: this.usagePollScheduler,
         providerIdleDeadlineMs: this.providerIdleDeadlineMs,
         paseoTools: launchContext?.paseoTools,
+        usageEnv: { ...process.env, ...this.runtimeSettings?.env, ...launchContext?.env },
         live: false,
       });
     } catch (error) {
