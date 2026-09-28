@@ -834,6 +834,28 @@ describe("OMP agent client and session", () => {
     expect(omp.completedTurnCount()).toBe(1);
   });
 
+  test("completes a no-turn notify with one notification and no assistant text", async () => {
+    const scheduler = new ManualNoTurnScheduler();
+    const omp = new OmpHarness({ noTurnScheduler: scheduler });
+    await omp.start();
+    const prompt = await omp.startPromptWithFalseLocalOnlyResult("/autoresearch off");
+    omp.emit({
+      type: "extension_ui_request",
+      id: "local-notify",
+      method: "notify",
+      message: "Autoresearch mode disabled",
+      notifyType: "info",
+    });
+
+    scheduler.settle();
+    await expect(prompt.completion).resolves.toMatchObject({ finalText: "" });
+    expect(omp.completedTurnCount()).toBe(1);
+    expect(omp.timeline().filter((item) => item.type === "notification")).toEqual([
+      { type: "notification", level: "info", message: "Autoresearch mode disabled" },
+    ]);
+    expect(omp.timeline().filter((item) => item.type === "assistant_message")).toEqual([]);
+  });
+
   test("waits for a delayed queued model turn after OMP's local-only result", async () => {
     const omp = new OmpHarness();
     await omp.start();
@@ -951,6 +973,33 @@ describe("OMP agent client and session", () => {
     expect(omp.extensionUiResponses()).toEqual([
       { id: "approval-1", response: { value: "Approve" } },
     ]);
+  });
+
+  test("shows OMP notifications during a turn and while idle with their levels", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    await omp.startTurn("work");
+    omp.runtime().beginTurn();
+    omp.emit({
+      type: "extension_ui_request",
+      id: "n1",
+      method: "notify",
+      message: "Working",
+      notifyType: "warning",
+    });
+    omp.runtime().finishTurn();
+    omp.emit({
+      type: "extension_ui_request",
+      id: "n2",
+      method: "notify",
+      message: "Done",
+      notifyType: "info",
+    });
+    expect(omp.timeline().filter((item) => item.type === "notification")).toEqual([
+      { type: "notification", level: "warning", message: "Working" },
+      { type: "notification", level: "info", message: "Done" },
+    ]);
+    expect(omp.timeline().filter((item) => item.type === "assistant_message")).toEqual([]);
   });
 
   test("maps legacy select options without descriptions and preserves ordinary responses", async () => {
