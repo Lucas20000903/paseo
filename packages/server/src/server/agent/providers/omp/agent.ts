@@ -19,6 +19,7 @@ import {
   type AgentPersistenceHandle,
   type AgentPromptInput,
   type AgentProvider,
+  type AgentResumeSessionOptions,
   type AgentRunOptions,
   type AgentRunResult,
   type AgentRuntimeInfo,
@@ -74,11 +75,7 @@ import { getUserMessageText } from "./message-history.js";
 import { mapOmpSystemNoticeToNotification } from "./system-notice.js";
 import { materializeProviderImage } from "../provider-image-output.js";
 import { OmpCliRuntime } from "./cli-runtime.js";
-import {
-  listOmpImportableSessions,
-  readOmpImportSessionConfig,
-  resolveOmpSessionFile,
-} from "./session-descriptor.js";
+import { listOmpImportableSessions, readOmpImportSessionConfig } from "./session-descriptor.js";
 import type { OmpRuntime, OmpRuntimeSession, OmpStartSessionInput } from "./runtime.js";
 import type {
   OmpAgentSessionEvent,
@@ -97,7 +94,7 @@ import {
   type OmpTrackedToolCall,
 } from "./tool-call-detail.js";
 import { mapOmpAvailableCommandsUpdate, mapOmpRuntimeSlashCommands } from "./commands.js";
-import { streamOmpHistory } from "./history.js";
+import { readOmpHistoryTodoState, streamOmpHistory } from "./history.js";
 import { mapOmpTodoReminderEvent, mapOmpTodoState, mapOmpTodoToolResult } from "./todo-mapper.js";
 import { mapOmpRuntimeEventToTimelineItem } from "./event-mapper.js";
 import { mapOmpAdvisorMessageToToolCall } from "./advisor-message.js";
@@ -582,6 +579,80 @@ function createRuntime(
     readyTimeoutMs: providerParams.readyTimeoutMs,
     requestTimeoutMs: providerParams.rpcTimeoutMs,
   });
+}
+
+class OmpHistorySession implements AgentSession {
+  readonly provider: AgentProvider;
+  readonly capabilities: AgentCapabilityFlags = withOmpCapabilities();
+
+  constructor(
+    private readonly handle: AgentPersistenceHandle,
+    private readonly config: OmpResumeConfig,
+    private readonly sessionFile: string,
+    provider: AgentProvider,
+  ) {
+    this.provider = provider;
+  }
+
+  get id(): string | null {
+    return this.handle.sessionId;
+  }
+
+  async run(): Promise<AgentRunResult> {
+    throw new Error("OMP history session cannot start a turn");
+  }
+
+  async startTurn(): Promise<{ turnId: string }> {
+    throw new Error("OMP history session cannot start a turn");
+  }
+
+  subscribe(): () => void {
+    return () => undefined;
+  }
+
+  async *streamHistory(): AsyncGenerator<AgentStreamEvent> {
+    yield* streamOmpHistory({ sessionFile: this.sessionFile, provider: this.provider });
+    const todo = await readOmpHistoryTodoState(this.sessionFile);
+    if (todo) yield { type: "timeline", provider: this.provider, item: todo };
+  }
+
+  async getRuntimeInfo(): Promise<AgentRuntimeInfo> {
+    return {
+      provider: this.provider,
+      sessionId: this.handle.sessionId,
+      model: this.config.model ?? null,
+      thinkingOptionId: this.config.thinkingOptionId ?? null,
+      modeId: this.config.modeId ?? null,
+    };
+  }
+
+  async getAvailableModes(): Promise<AgentMode[]> {
+    return [...OMP_MODES];
+  }
+
+  async getCurrentMode(): Promise<string | null> {
+    return this.config.modeId ?? null;
+  }
+
+  async setMode(): Promise<void> {
+    throw new Error("OMP history session cannot change mode");
+  }
+
+  getPendingPermissions(): AgentPermissionRequest[] {
+    return [];
+  }
+
+  async respondToPermission(): Promise<void> {
+    throw new Error("OMP history session has no pending permissions");
+  }
+
+  describePersistence(): AgentPersistenceHandle {
+    return this.handle;
+  }
+
+  async interrupt(): Promise<void> {}
+
+  async close(): Promise<void> {}
 }
 
 export class OmpAgentSession implements AgentSession {
@@ -2107,6 +2178,7 @@ export class OmpAgentClient implements AgentClient {
     handle: AgentPersistenceHandle,
     overrides?: Partial<AgentSessionConfig>,
     launchContext?: AgentLaunchContext,
+    options?: AgentResumeSessionOptions,
   ): Promise<AgentSession> {
     const sessionFile = handle.nativeHandle;
     if (!sessionFile) {
@@ -2115,6 +2187,10 @@ export class OmpAgentClient implements AgentClient {
 
     const persistenceMetadata = parsePersistenceMetadata(handle.metadata);
     const resumeConfig = buildResumeConfig(persistenceMetadata, overrides, this.provider);
+
+    if (options?.purpose === "history") {
+      return new OmpHistorySession(handle, resumeConfig, sessionFile, this.provider);
+    }
 
     const launchMode = this.resolveLaunchMode(resumeConfig.modeId);
     const runtimeSession = await this.runtime.startSession(
@@ -2212,14 +2288,10 @@ export class OmpAgentClient implements AgentClient {
       sessionDir: this.providerParams.sessionDir,
       runtimeSettings: this.runtimeSettings,
     };
-    const sessionFile = await resolveOmpSessionFile(input.providerHandleId, descriptorOptions);
-    if (!sessionFile) {
-      this.logger.warn(
-        { providerHandleId: input.providerHandleId },
-        "OMP import could not locate the session file; model and thinking level will fall back to provider defaults",
-      );
-    }
-    const importConfig = sessionFile ? await readOmpImportSessionConfig(sessionFile) : {};
+    const importConfig = await readOmpImportSessionConfig(
+      input.providerHandleId,
+      descriptorOptions,
+    );
     return importSessionFromPersistence({
       provider: this.provider,
       request: input,
