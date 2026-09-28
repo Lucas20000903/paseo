@@ -6,11 +6,12 @@ import {
   shouldDisplayOmpCustomMessage,
 } from "./custom-message.js";
 import {
-  extractTextFromToolResult,
   mapToolDetail,
   parseToolArgs,
   parseToolResult,
   resolveToolCallName,
+  toolFailureMessage,
+  isOmpToolFailure,
   type OmpToolResult,
   type OmpTrackedToolCall,
 } from "./tool-call-detail.js";
@@ -139,20 +140,16 @@ export class OmpHistoryMapper {
       return this.customIndex;
     });
     const skillPrompt = ompSkillPromptUserText(message);
+    if (skillPrompt) {
+      return [
+        {
+          type: "timeline",
+          provider: this.provider,
+          item: { type: "user_message", text: skillPrompt, messageId: `${messageId}-user` },
+        },
+      ];
+    }
     return [
-      ...(skillPrompt
-        ? [
-            {
-              type: "timeline" as const,
-              provider: this.provider,
-              item: {
-                type: "user_message" as const,
-                text: skillPrompt,
-                messageId: `${messageId}-user`,
-              },
-            },
-          ]
-        : []),
       {
         type: "timeline",
         provider: this.provider,
@@ -226,9 +223,9 @@ export class OmpHistoryMapper {
       item: toToolResultTimelineItem({
         callId: this.resolveToolCallId(message.toolCallId, tracked),
         name: resolveToolCallName(tracked, result),
-        isError: Boolean(message.isError),
+        isError: isOmpToolFailure(tracked, result, Boolean(message.isError)),
         detail,
-        errorText: extractTextFromToolResult(result) ?? "Tool call failed",
+        errorText: toolFailureMessage(result),
       }),
     };
   }

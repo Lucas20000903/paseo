@@ -27,6 +27,33 @@ async function collectHistory(
 }
 
 describe("OMP history mapper", () => {
+  test("replays a web search details error as failed when OMP sets isError false", async () => {
+    const events = await collectHistory([
+      {
+        role: "assistant",
+        content: [
+          { type: "toolCall", id: "web-1", name: "web_search", arguments: { query: "Paseo" } },
+        ],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "web-1",
+        toolName: "web_search",
+        content: [{ type: "text", text: "Error: All web search providers failed" }],
+        details: {
+          error: "All web search providers failed",
+          response: { provider: "none", sources: [] },
+        },
+        isError: false,
+      },
+    ]);
+    expect(events.at(-1)?.item).toMatchObject({
+      type: "tool_call",
+      status: "failed",
+      error: "All web search providers failed",
+    });
+  });
+
   test("coalesces replayed subagent poll calls by target set", async () => {
     const events = await collectHistory([
       {
@@ -384,7 +411,7 @@ describe("OMP history mapper", () => {
           ? [event.item.detail.type]
           : [],
       ),
-    ).toEqual(["unknown", "unknown"]);
+    ).toEqual(["plain_text", "unknown"]);
   });
 
   test("maps only the active JSONL chain with native user ids and visible unknown roles", async () => {
@@ -574,7 +601,6 @@ describe("OMP history mapper", () => {
     expect(events.map((event) => event.item)).toEqual([
       { type: "assistant_message", text: "Done.", messageId: "resp-1" },
       { type: "user_message", text: "/skill:commit", messageId: "omp-custom-skill-1-user" },
-      { type: "assistant_message", text: skillPrompt, messageId: "omp-custom-skill-1" },
       { type: "assistant_message", text: ircMessage, messageId: "omp-custom-irc-1" },
       {
         type: "assistant_message",
@@ -632,15 +658,6 @@ describe("OMP history mapper", () => {
           type: "user_message",
           text: "/skill:improve tests",
           messageId: "omp-custom-skill-args-user",
-        },
-      },
-      {
-        type: "timeline",
-        provider: "omp",
-        item: {
-          type: "assistant_message",
-          text: '[IMPORTANT: User invoked the "improve" skill; follow its instructions.]',
-          messageId: "omp-custom-skill-args",
         },
       },
       {

@@ -70,7 +70,11 @@ import {
 } from "./provider-config.js";
 export { formatOmpVersionSupport, resolveOmpDiagnosticPaths } from "./provider-config.js";
 import { OmpSubagentCardTracker, type OmpSubagentCardScheduler } from "./subagent-card-tracker.js";
-import { ompCustomMessageId, shouldDisplayOmpCustomMessage } from "./custom-message.js";
+import {
+  ompCustomMessageId,
+  ompSkillPromptUserText,
+  shouldDisplayOmpCustomMessage,
+} from "./custom-message.js";
 import { getUserMessageText } from "./message-history.js";
 import { mapOmpSystemNoticeToNotification } from "./system-notice.js";
 import { materializeProviderImage } from "../provider-image-output.js";
@@ -89,6 +93,8 @@ import type {
 import {
   parseToolArgs,
   parseToolResult,
+  toolFailureMessage,
+  isOmpToolFailure,
   resolveToolCallName,
   type OmpToolResult,
   type OmpTrackedToolCall,
@@ -665,7 +671,8 @@ export class OmpAgentSession implements AgentSession {
   private readonly pendingExtensionUiRequests = new Map<string, AgentPermissionRequest>();
   private readonly questionUi = new OmpQuestionUi();
   private activeTurnId: string | null = null;
-  private readonly pendingClientMessages: Array<{ clientMessageId: string | null }> = [];
+  private readonly pendingClientMessages: Array<{ clientMessageId: string | null; text: string }> =
+    [];
   private activeAssistantMessageId: string | null = null;
   private activeTurnTerminalAssistantMessage: OmpAgentMessage | null = null;
   private activeTurnStarted = false;
@@ -810,7 +817,7 @@ export class OmpAgentSession implements AgentSession {
     const turnId = randomUUID();
     this.live = true;
     this.activeTurnId = turnId;
-    this.rememberClientMessage(options?.clientMessageId ?? null);
+    this.rememberClientMessage(options?.clientMessageId ?? null, payload.text);
     this.activeAssistantMessageId = null;
     this.activeTurnTerminalAssistantMessage = null;
     this.activeTurnStarted = false;
@@ -876,7 +883,7 @@ export class OmpAgentSession implements AgentSession {
       return { status: "unavailable" };
     const payload = convertPromptInput(prompt, { model: this.state.model });
     if (this.parseSlashCommandInput(payload.text)) return { status: "unavailable" };
-    const submission = this.rememberClientMessage(options.clientMessageId ?? null);
+    const submission = this.rememberClientMessage(options.clientMessageId ?? null, payload.text);
     try {
       await this.runtimeSession.steer(payload.text, payload.images);
     } catch (error) {
@@ -897,22 +904,26 @@ export class OmpAgentSession implements AgentSession {
     return { status: "accepted" };
   }
 
-  private rememberClientMessage(clientMessageId: string | null): {
+  private rememberClientMessage(
+    clientMessageId: string | null,
+    text: string,
+  ): {
     clientMessageId: string | null;
+    text: string;
   } {
-    const submission = { clientMessageId };
+    const submission = { clientMessageId, text };
     this.pendingClientMessages.push(submission);
     if (this.pendingClientMessages.length > 16) this.pendingClientMessages.shift();
     return submission;
   }
 
-  private forgetClientMessage(submission: { clientMessageId: string | null }): void {
+  private forgetClientMessage(submission: { clientMessageId: string | null; text: string }): void {
     const index = this.pendingClientMessages.indexOf(submission);
     if (index >= 0) this.pendingClientMessages.splice(index, 1);
   }
 
-  private takeClientMessageId(): string | null | undefined {
-    return this.pendingClientMessages.shift()?.clientMessageId;
+  private takeClientMessage(): { clientMessageId: string | null; text: string } | undefined {
+    return this.pendingClientMessages.shift();
   }
 
   subscribe(callback: (event: AgentStreamEvent) => void): () => void {
@@ -1280,7 +1291,7 @@ export class OmpAgentSession implements AgentSession {
     const outputs = this.pendingNoTurnOutputs.filter((output) => output.turnId === turnId);
     this.clearNoTurnBuffers();
     if (promptText) {
-      const clientMessageId = this.takeClientMessageId();
+      const clientMessageId = this.takeClientMessage()?.clientMessageId;
       this.emit({
         type: "timeline",
         provider: this.provider,
@@ -1823,8 +1834,9 @@ export class OmpAgentSession implements AgentSession {
     this.questionUi.finish(event.toolName);
 
     const result = parseToolResult(event.result);
-    const error = event.isError ? event.result : null;
-    const status = event.isError ? "failed" : "completed";
+    const failed = isOmpToolFailure(toolCall, result, Boolean(event.isError));
+    const error = failed ? toolFailureMessage(result) : null;
+    const status = failed ? "failed" : "completed";
     this.emitToolCallEvent(event.toolCallId, toolCall, status, result, error);
     if (event.toolName === "task") {
       this.subagentCardTracker.delete(event.toolCallId);
@@ -1929,6 +1941,11 @@ export class OmpAgentSession implements AgentSession {
       if (shouldDisplayOmpCustomMessage(event.message)) {
         const text = getUserMessageText(event.message.content);
         if (text) {
+          const skillPrompt = ompSkillPromptUserText(event.message);
+          if (skillPrompt) {
+            this.emitSkillPromptEcho(turnId);
+            return;
+          }
           const item =
             mapOmpAdvisorMessageToToolCall(event.message, text) ??
             mapOmpSystemNoticeToNotification(text);
@@ -1969,7 +1986,7 @@ export class OmpAgentSession implements AgentSession {
         }
         this.emittedUserMessageIds.add(resolvedMessageId);
       }
-      const clientMessageId = this.takeClientMessageId();
+      const clientMessageId = this.takeClientMessage()?.clientMessageId;
       this.emit({
         type: "timeline",
         provider: this.provider,
@@ -1998,6 +2015,22 @@ export class OmpAgentSession implements AgentSession {
         );
         emitUserMessage();
       });
+  }
+
+  private emitSkillPromptEcho(turnId: string | undefined): void {
+    const pending = this.takeClientMessage();
+    if (!pending) return;
+    this.activeTurnHasUserMessage = true;
+    this.emit({
+      type: "timeline",
+      provider: this.provider,
+      turnId,
+      item: {
+        type: "user_message",
+        text: pending.text,
+        ...(pending.clientMessageId ? { clientMessageId: pending.clientMessageId } : {}),
+      },
+    });
   }
 
   private emitToolCallEvent(

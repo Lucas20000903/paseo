@@ -668,6 +668,154 @@ describe("OMP agent client and session", () => {
     ]);
   });
 
+  test("shows a concise error for a failed tool while keeping shell output", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    omp.emit({
+      type: "tool_execution_start",
+      toolCallId: "failed-shell",
+      toolName: "bash",
+      args: { command: "false" },
+    });
+    omp.emit({
+      type: "tool_execution_end",
+      toolCallId: "failed-shell",
+      toolName: "bash",
+      result: {
+        content: [{ type: "text", text: "Command exited with code 1" }],
+        details: {},
+        isError: true,
+        exitCode: 1,
+      },
+      isError: true,
+    });
+    expect(omp.timeline().at(-1)).toMatchObject({
+      type: "tool_call",
+      status: "failed",
+      error: "Command exited with code 1",
+      detail: { type: "shell", command: "false", exitCode: 1 },
+    });
+  });
+
+  test("uses the exit message when a failed shell has no output", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    omp.emit({
+      type: "tool_execution_start",
+      toolCallId: "empty-shell",
+      toolName: "bash",
+      args: { command: "false" },
+    });
+    omp.emit({
+      type: "tool_execution_end",
+      toolCallId: "empty-shell",
+      toolName: "bash",
+      result: {
+        content: [
+          {
+            type: "text",
+            text: "(no output)\n\nWall time: 0.02 seconds\n\nCommand exited with code 1",
+          },
+        ],
+        isError: true,
+      },
+      isError: true,
+    });
+    expect(omp.timeline().at(-1)).toMatchObject({ error: "Command exited with code 1" });
+  });
+
+  test("does not duplicate the typed invocation for a live skill expansion", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    await omp.runPromptWithCustomMessage(
+      "hello",
+      {
+        role: "custom",
+        content: "[IMPORTANT] Full skill body",
+        customType: "skill-prompt",
+        attribution: "user",
+        details: { name: "commit" },
+        display: true,
+        id: "skill-1",
+      },
+      "done",
+    );
+    expect(omp.timeline().filter((item) => item.type === "user_message")).toEqual([
+      { type: "user_message", text: "hello", messageId: "user-1" },
+    ]);
+    expect(omp.timeline()).not.toContainEqual(
+      expect.objectContaining({ text: "[IMPORTANT] Full skill body" }),
+    );
+  });
+
+  test.each([
+    { kind: "initial", priorPrompt: false },
+    { kind: "follow-up", priorPrompt: true },
+  ])("correlates a $kind skill invocation without a user echo", async ({ priorPrompt }) => {
+    const omp = new OmpHarness();
+    await omp.start();
+    if (priorPrompt) {
+      await omp.runPrompt("Reply OK", "OK");
+    }
+
+    const typed = "/skill:tldr Summarize: hi.";
+    const runtime = omp.runtime();
+    const promptStarted = runtime.nextPrompt();
+    const run = omp.requireSession().run(typed, { clientMessageId: "client-skill" });
+    await promptStarted;
+    runtime.beginTurn();
+    runtime.emit({
+      type: "message_end",
+      message: {
+        role: "custom",
+        content: "[IMPORTANT] Full skill body",
+        customType: "skill-prompt",
+        attribution: "user",
+        details: { name: "tldr", args: "Summarize: hi." },
+        display: true,
+        id: "skill-1",
+      },
+    });
+    runtime.streamAssistantText("done");
+    runtime.finishTurn();
+    await run;
+
+    expect(omp.timeline().filter((item) => item.type === "user_message")).toEqual([
+      ...(priorPrompt ? [{ type: "user_message", text: "Reply OK", messageId: "user-1" }] : []),
+      { type: "user_message", text: typed, clientMessageId: "client-skill" },
+    ]);
+  });
+
+  test("marks an OMP web search details error as failed even without isError", async () => {
+    const omp = new OmpHarness();
+    await omp.start();
+    omp.emit({
+      type: "tool_execution_start",
+      toolCallId: "search-failed",
+      toolName: "web_search",
+      args: { query: "Paseo" },
+    });
+    omp.emit({
+      type: "tool_execution_end",
+      toolCallId: "search-failed",
+      toolName: "web_search",
+      result: {
+        content: [{ type: "text", text: "Error: All web search providers failed" }],
+        details: {
+          response: { provider: "mojeek", sources: [] },
+          error: "All web search providers failed",
+        },
+      },
+      isError: false,
+    });
+    expect(omp.timeline().at(-1)).toMatchObject({
+      type: "tool_call",
+      status: "failed",
+      error: "All web search providers failed",
+      detail: { type: "search", query: "Paseo" },
+    });
+  });
+
   test("does not complete a queued model turn from OMP's local-only hint", async () => {
     const omp = new OmpHarness();
     await omp.start();
