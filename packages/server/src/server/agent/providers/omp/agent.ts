@@ -67,12 +67,16 @@ import {
 } from "./provider-config.js";
 export { formatOmpVersionSupport, resolveOmpDiagnosticPaths } from "./provider-config.js";
 import { OmpSubagentCardTracker, type OmpSubagentCardScheduler } from "./subagent-card-tracker.js";
-import { shouldDisplayOmpCustomMessage } from "./custom-message.js";
+import { ompCustomMessageId, shouldDisplayOmpCustomMessage } from "./custom-message.js";
 import { getUserMessageText } from "./message-history.js";
 import { mapOmpSystemNoticeToNotification } from "./system-notice.js";
 import { materializeProviderImage } from "../provider-image-output.js";
 import { OmpCliRuntime } from "./cli-runtime.js";
-import { listOmpImportableSessions, readOmpImportSessionConfig } from "./session-descriptor.js";
+import {
+  listOmpImportableSessions,
+  readOmpImportSessionConfig,
+  resolveOmpSessionFile,
+} from "./session-descriptor.js";
 import type { OmpRuntime, OmpRuntimeSession, OmpStartSessionInput } from "./runtime.js";
 import type {
   OmpAgentSessionEvent,
@@ -281,7 +285,8 @@ function isOmpThinkingLevel(value: string | null | undefined): value is OmpThink
     value === "medium" ||
     value === "high" ||
     value === "xhigh" ||
-    value === "max"
+    value === "max" ||
+    value === "auto"
   );
 }
 
@@ -908,6 +913,7 @@ export class OmpAgentSession implements AgentSession {
   private closed = false;
   private live: boolean;
   private readonly emittedUserMessageIds = new Set<string>();
+  private customMessageIndex = 0;
 
   constructor(options: OmpAgentSessionOptions) {
     this.runtimeSession = options.runtimeSession;
@@ -2055,7 +2061,14 @@ export class OmpAgentSession implements AgentSession {
             type: "timeline",
             provider: this.provider,
             turnId,
-            item: item ?? { type: "assistant_message", text },
+            item: item ?? {
+              type: "assistant_message",
+              text,
+              messageId: ompCustomMessageId(event.message, () => {
+                this.customMessageIndex += 1;
+                return this.customMessageIndex;
+              }),
+            },
           });
         }
       }
@@ -2410,7 +2423,18 @@ export class OmpAgentClient implements AgentClient {
   }
 
   async importSession(input: ImportProviderSessionInput, context: ImportProviderSessionContext) {
-    const importConfig = await readOmpImportSessionConfig(input.providerHandleId);
+    const descriptorOptions = {
+      sessionDir: this.providerParams.sessionDir,
+      runtimeSettings: this.runtimeSettings,
+    };
+    const sessionFile = await resolveOmpSessionFile(input.providerHandleId, descriptorOptions);
+    if (!sessionFile) {
+      this.logger.warn(
+        { providerHandleId: input.providerHandleId },
+        "OMP import could not locate the session file; model and thinking level will fall back to provider defaults",
+      );
+    }
+    const importConfig = sessionFile ? await readOmpImportSessionConfig(sessionFile) : {};
     return importSessionFromPersistence({
       provider: this.provider,
       request: input,
