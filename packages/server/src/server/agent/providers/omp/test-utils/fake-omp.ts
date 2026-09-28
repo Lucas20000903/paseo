@@ -97,6 +97,8 @@ export class FakeOmp implements OmpRuntime {
 }
 
 export class FakeOmpSession implements OmpRuntimeSession {
+  fastModeResult = { enabled: false, active: false };
+  readonly setFastModeRequests: boolean[] = [];
   readonly prompts: Array<{ message: string; imageCount: number }> = [];
   readonly compactRequests: Array<{ customInstructions?: string }> = [];
   readonly setAutoCompactionRequests: boolean[] = [];
@@ -106,6 +108,7 @@ export class FakeOmpSession implements OmpRuntimeSession {
   readonly setThinkingLevelRequests: OmpThinkingLevel[] = [];
   readonly handoffRequests: Array<{ customInstructions?: string }> = [];
   readonly steerRequests: Array<{ message: string; imageCount: number }> = [];
+  steerError: Error | null = null;
   readonly followUpRequests: Array<{ message: string; imageCount: number }> = [];
   readonly hostToolSetRequests: OmpRpcHostToolDefinition[][] = [];
   readonly hostToolResults: OmpRpcHostToolResult[] = [];
@@ -159,6 +162,8 @@ export class FakeOmpSession implements OmpRuntimeSession {
       isStreaming: false,
       isCompacting: false,
       autoCompactionEnabled: true,
+      fastModeEnabled: false,
+      fastModeActive: false,
       sessionFile: launch.session ?? "/tmp/omp-session",
       sessionId: "omp-session-1",
       messageCount: 0,
@@ -269,6 +274,16 @@ export class FakeOmpSession implements OmpRuntimeSession {
     return this.state;
   }
 
+  async setFastMode(enabled: boolean): Promise<{ enabled: boolean; active: boolean }> {
+    this.setFastModeRequests.push(enabled);
+    this.state = {
+      ...this.state,
+      fastModeEnabled: this.fastModeResult.enabled,
+      fastModeActive: this.fastModeResult.active,
+    };
+    return this.fastModeResult;
+  }
+
   /** Holds every state request until the returned function releases them. */
   holdStateRequests(): () => void {
     const held: Array<() => void> = [];
@@ -350,8 +365,12 @@ export class FakeOmpSession implements OmpRuntimeSession {
     return this.branchMessages;
   }
 
-  steer(message: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): void {
+  async steer(
+    message: string,
+    images?: Array<{ type: "image"; data: string; mimeType: string }>,
+  ): Promise<void> {
     this.steerRequests.push({ message, imageCount: images?.length ?? 0 });
+    if (this.steerError) throw this.steerError;
   }
 
   followUp(
