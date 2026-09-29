@@ -125,6 +125,26 @@ describe("daemon-manager commands", () => {
     });
   });
 
+  it("reports a stopped daemon without launching the CLI when no local daemon runs", async () => {
+    mkdirSync(mocks.paseoHome);
+    writeFileSync(path.join(mocks.paseoHome, "server-id"), "srv_existing\n");
+    mocks.runExternalCliJsonCommand.mockResolvedValue({
+      home: mocks.paseoHome,
+      pid: null,
+      startedAt: null,
+      listen: null,
+      hostname: null,
+      localDaemon: "stopped",
+      desktopManaged: false,
+      connectedDaemon: "not_probed",
+    });
+
+    const status = await createDaemonCommandHandlers().desktop_daemon_status();
+
+    expect(status).toMatchObject({ serverId: "", status: "stopped", pid: null });
+    expect(mocks.runExternalCliJsonCommand).not.toHaveBeenCalled();
+  });
+
   it("returns a local credential only for its live managed daemon listen", async () => {
     mkdirSync(mocks.paseoHome);
     const token = "a".repeat(43);
